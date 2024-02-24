@@ -27,10 +27,10 @@ Finally, install the `Configuration`:
 apiVersion: pkg.crossplane.io/v1
 kind: Configuration
 metadata:
-  name: control-plane-example
+  name: example-control-plane
 spec:
   type: Source
-  sourceName: control-plane-example
+  sourceName: example-control-plane
   init:
     apiVersion: example.crossplane.io/v1
     kind: XInitConfig

@@ -1,0 +1,935 @@
+apiVersion: pkg.crossplane.io/v1
+kind: ConfigurationSource
+metadata:
+  name: example-control-plane
+spec:
+  # The spec of the ConfigurationSource is mostly identical to crossplane.yaml.
+  crossplane:
+    version: ">=v1.14.1-0"
+  dependsOn:
+  - provider: xpkg.upbound.io/upbound/provider-aws-rds
+    version: "v1.1.1"
+  - provider: xpkg.upbound.io/upbound/provider-aws-ec2
+    version: "v1.1.1"
+  - function: xpkg.upbound.io/crossplane-contrib/function-patch-and-transform
+    version: "v0.3.0"
+  init:
+    compositeTypeRef:
+      apiVersion: example.crossplane.io/v1
+      Kind: XInitConfig
+  # However it also includes an array of all 'packaged' objects.
+  objects:
+
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xinitconfigs.aws.platform.upbound.io
+spec:
+  group: aws.platform.upbound.io
+  names:
+    kind: XInitConfig
+    plural: xinitconfigs
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                irsaRoleARN:
+                  type: string
+                vaultServer:
+                  type: string
+              required:
+                - vaultServer
+                - irsaRoleARN
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: xinitconfigs.aws.platform.upbound.io
+spec:
+  writeConnectionSecretsToNamespace: upbound-system
+  compositeTypeRef:
+    apiVersion: aws.platform.upbound.io/v1alpha1
+    kind: XInitConifg
+  mode: Pipeline
+  pipeline:
+  - step: patch-and-transform
+    functionRef:
+      name: crossplane-contrib-function-patch-and-transform
+    input:
+      apiVersion: pt.fn.crossplane.io/v1beta1
+      kind: Resources
+      resources:
+      - name: deploymentruntimeconfig
+        base:
+          apiVersion: pkg.crossplane.io/v1beta1
+          kind: DeploymentRuntimeConfig
+          metadata:
+            name: default
+          spec:
+            deploymentTemplate:
+              spec:
+                selector: {}
+                template:
+                  spec:
+                    containers:
+                    - name: package-runtime
+                      args:
+                      - --enable-external-secret-stores
+                      - --enable-management-policies
+        patches:
+        - type: FromCompositeFieldPath
+          fromFieldPath: spec.irsaRoleARN
+          toFieldPath: spec.deploymentTemplate.metadata.annotations[eks.amazonaws.com/role-arn]
+        readinessChecks:
+        - type: None
+      - name: providerconfig
+        base:
+          apiVersion: aws.upbound.io/v1beta1
+          kind: ProviderConfig
+          metadata:
+            name: default
+          spec:
+            credentials:
+              source: IRSA
+      - name: storeconfig
+        base:
+          apiVersion: secrets.crossplane.io/v1alpha1
+          kind: StoreConfig
+          metadata:
+            name: vault
+          spec:
+            type: Plugin
+            defaultScope: crossplane-system
+            plugin:
+              endpoint: ess-plugin-vault.crossplane-system:4040
+              configRef:
+                apiVersion: secrets.crossplane.io/v1alpha1
+                kind: VaultConfig
+                name: vault-internal
+        readinessChecks:
+        - type: None
+      - name: vaultconfig
+        base:
+          apiVersion: secrets.crossplane.io/v1alpha1
+          kind: VaultConfig
+          metadata:
+            name: vault-internal
+          spec:
+            mountPath: secret/controlplane-blue/
+            version: v2
+            auth:
+              method: Token
+              token:
+                source: Filesystem
+                fs:
+                  path: /vault/secrets/token
+        patches:
+        - type: FromCompositeFieldPath
+          fromFieldPath: spec.vaultServer
+          toFieldPath: spec.server
+        readinessChecks:
+        - type: None
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xnetworks.aws.platform.upbound.io
+spec:
+  group: aws.platform.upbound.io
+  names:
+    kind: XNetwork
+    plural: xnetworks
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                parameters:
+                  description: Network Parameters
+                  properties:
+                    id:
+                      type: string
+                      description: ID of this Network that other objects will use to refer to it.
+                    region:
+                      type: string
+                      description: Region is the region you'd like your resource to be created in.
+                    deletionPolicy:
+                      description: Delete the external resources when the Claim/XR is deleted. Defaults to Delete
+                      enum:
+                        - Delete
+                        - Orphan
+                      type: string
+                      default: Delete
+                    providerConfigName:
+                      description: Crossplane ProviderConfig to use for provisioning this resources
+                      type: string
+                      default: default
+                  required:
+                    - deletionPolicy
+                    - providerConfigName
+                    - id
+                    - region
+                  type: object
+              required:
+                - parameters
+            status:
+              type: object
+              properties:
+                vpcId:
+                  type: string
+                subnetIds:
+                  type: array
+                  items:
+                    type: string
+                publicSubnetIds:
+                  type: array
+                  items:
+                    type: string
+                privateSubnetIds:
+                  type: array
+                  items:
+                    type: string
+                securityGroupIds:
+                  type: array
+                  items:
+                    type: string
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: xnetworks.aws.platform.upbound.io
+  labels:
+    provider: aws
+    type: basic
+spec:
+  writeConnectionSecretsToNamespace: upbound-system
+  compositeTypeRef:
+    apiVersion: aws.platform.upbound.io/v1alpha1
+    kind: XNetwork
+  mode: Pipeline
+  pipeline:
+    - step: patch-and-transform
+      functionRef:
+        name: crossplane-contrib-function-patch-and-transform
+      input:
+        apiVersion: pt.fn.crossplane.io/v1beta1
+        kind: Resources
+        patchSets:
+          - name: providerConfigRef
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.providerConfigName
+                toFieldPath: spec.providerConfigRef.name
+          - name: deletionPolicy
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.deletionPolicy
+                toFieldPath: spec.deletionPolicy
+          - name: network-id
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.id
+                toFieldPath: metadata.labels[networks.aws.platform.upbound.io/network-id]
+          - name: network-id-tags
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.id
+                toFieldPath: spec.forProvider.tags[networks.aws.platform.upbound.io/network-id]
+          - name: region
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.region
+                toFieldPath: spec.forProvider.region
+        resources:
+          - name: vpc
+            base:
+              apiVersion: ec2.aws.upbound.io/v1beta1
+              kind: VPC
+              spec:
+                forProvider:
+                  cidrBlock: 192.168.0.0/16
+                  enableDnsHostnames: true
+                  enableDnsSupport: true
+                  tags:
+                    Name: ""
+            patches:
+              - type: PatchSet
+                patchSetName: providerConfigRef
+              - type: PatchSet
+                patchSetName: deletionPolicy
+              - type: PatchSet
+                patchSetName: network-id
+              - type: PatchSet
+                patchSetName: region
+              - type: FromCompositeFieldPath
+                fromFieldPath: metadata.name
+                toFieldPath: spec.forProvider.tags["Name"]
+              - type: ToCompositeFieldPath
+                fromFieldPath: status.atProvider.id
+                toFieldPath: status.vpcId
+          - name: internetGateway
+            base:
+              apiVersion: ec2.aws.upbound.io/v1beta1
+              kind: InternetGateway
+              spec:
+                forProvider:
+                  vpcIdSelector:
+                    matchControllerRef: true
+            patches:
+              - type: PatchSet
+                patchSetName: providerConfigRef
+              - type: PatchSet
+                patchSetName: deletionPolicy
+              - type: PatchSet
+                patchSetName: network-id
+              - type: PatchSet
+                patchSetName: region
+          - name: subnetPublicA
+            base:
+              apiVersion: ec2.aws.upbound.io/v1beta1
+              kind: Subnet
+              metadata:
+                labels:
+                  access: public
+              spec:
+                forProvider:
+                  cidrBlock: 192.168.0.0/18
+                  mapPublicIpOnLaunch: true
+                  tags:
+                    kubernetes.io/role/elb: "1"
+                  vpcIdSelector:
+                    matchControllerRef: true
+            patches:
+              - type: PatchSet
+                patchSetName: providerConfigRef
+              - type: PatchSet
+                patchSetName: deletionPolicy
+              - type: PatchSet
+                patchSetName: network-id
+              - type: PatchSet
+                patchSetName: network-id-tags
+              - type: PatchSet
+                patchSetName: region
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.region
+                toFieldPath: spec.forProvider.availabilityZone
+                transforms:
+                  - type: string
+                    string:
+                      fmt: '%sa'
+                      type: Format
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.region
+                toFieldPath: metadata.labels[zone]
+                transforms:
+                  - type: string
+                    string:
+                      fmt: '%sa'
+                      type: Format
+              - type: ToCompositeFieldPath
+                fromFieldPath: metadata.annotations[crossplane.io/external-name]
+                toFieldPath: status.subnetIds[0]
+              - type: ToCompositeFieldPath
+                fromFieldPath: metadata.annotations[crossplane.io/external-name]
+                toFieldPath: status.publicSubnetIds[0]
+          - name: subnetPublicB
+            base:
+              apiVersion: ec2.aws.upbound.io/v1beta1
+              kind: Subnet
+              metadata:
+                labels:
+                  access: public
+              spec:
+                forProvider:
+                  cidrBlock: 192.168.64.0/18
+                  mapPublicIpOnLaunch: true
+                  tags:
+                    kubernetes.io/role/elb: "1"
+                  vpcIdSelector:
+                    matchControllerRef: true
+            patches:
+              - type: PatchSet
+                patchSetName: providerConfigRef
+              - type: PatchSet
+                patchSetName: deletionPolicy
+              - type: PatchSet
+                patchSetName: network-id
+              - type: PatchSet
+                patchSetName: network-id-tags
+              - type: PatchSet
+                patchSetName: region
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.region
+                toFieldPath: spec.forProvider.availabilityZone
+                transforms:
+                  - type: string
+                    string:
+                      fmt: '%sb'
+                      type: Format
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.region
+                toFieldPath: metadata.labels[zone]
+                transforms:
+                  - type: string
+                    string:
+                      fmt: '%sb'
+                      type: Format
+              - type: ToCompositeFieldPath
+                fromFieldPath: metadata.annotations[crossplane.io/external-name]
+                toFieldPath: status.subnetIds[1]
+              - type: ToCompositeFieldPath
+                fromFieldPath: metadata.annotations[crossplane.io/external-name]
+                toFieldPath: status.publicSubnetIds[1]
+          - name: subnetPrivateA
+            base:
+              apiVersion: ec2.aws.upbound.io/v1beta1
+              kind: Subnet
+              metadata:
+                labels:
+                  access: private
+              spec:
+                forProvider:
+                  cidrBlock: 192.168.128.0/18
+                  tags:
+                    kubernetes.io/role/internal-elb: "1"
+                  vpcIdSelector:
+                    matchControllerRef: true
+            patches:
+              - type: PatchSet
+                patchSetName: providerConfigRef
+              - type: PatchSet
+                patchSetName: deletionPolicy
+              - type: PatchSet
+                patchSetName: network-id
+              - type: PatchSet
+                patchSetName: region
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.region
+                toFieldPath: spec.forProvider.availabilityZone
+                transforms:
+                  - type: string
+                    string:
+                      fmt: '%sa'
+                      type: Format
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.region
+                toFieldPath: metadata.labels[zone]
+                transforms:
+                  - type: string
+                    string:
+                      fmt: '%sa'
+                      type: Format
+              - type: ToCompositeFieldPath
+                fromFieldPath: metadata.annotations[crossplane.io/external-name]
+                toFieldPath: status.subnetIds[2]
+              - type: ToCompositeFieldPath
+                fromFieldPath: metadata.annotations[crossplane.io/external-name]
+                toFieldPath: status.privateSubnetIds[0]
+          - name: subnetPrivateB
+            base:
+              apiVersion: ec2.aws.upbound.io/v1beta1
+              kind: Subnet
+              metadata:
+                labels:
+                  access: private
+              spec:
+                forProvider:
+                  cidrBlock: 192.168.192.0/18
+                  tags:
+                    kubernetes.io/role/internal-elb: "1"
+                  vpcIdSelector:
+                    matchControllerRef: true
+            patches:
+              - type: PatchSet
+                patchSetName: providerConfigRef
+              - type: PatchSet
+                patchSetName: deletionPolicy
+              - type: PatchSet
+                patchSetName: network-id
+              - type: PatchSet
+                patchSetName: region
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.region
+                toFieldPath: spec.forProvider.availabilityZone
+                transforms:
+                  - type: string
+                    string:
+                      fmt: '%sb'
+                      type: Format
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.region
+                toFieldPath: metadata.labels[zone]
+                transforms:
+                  - type: string
+                    string:
+                      fmt: '%sb'
+                      type: Format
+              - type: ToCompositeFieldPath
+                fromFieldPath: metadata.annotations[crossplane.io/external-name]
+                toFieldPath: status.subnetIds[3]
+              - type: ToCompositeFieldPath
+                fromFieldPath: metadata.annotations[crossplane.io/external-name]
+                toFieldPath: status.privateSubnetIds[1]
+          - name: routeTable
+            base:
+              apiVersion: ec2.aws.upbound.io/v1beta1
+              kind: RouteTable
+              spec:
+                forProvider:
+                  vpcIdSelector:
+                    matchControllerRef: true
+            patches:
+              - type: PatchSet
+                patchSetName: providerConfigRef
+              - type: PatchSet
+                patchSetName: deletionPolicy
+              - type: PatchSet
+                patchSetName: network-id
+              - type: PatchSet
+                patchSetName: region
+          - name: route
+            base:
+              apiVersion: ec2.aws.upbound.io/v1beta1
+              kind: Route
+              spec:
+                forProvider:
+                  destinationCidrBlock: 0.0.0.0/0
+                  gatewayIdSelector:
+                    matchControllerRef: true
+                  routeTableIdSelector:
+                    matchControllerRef: true
+            patches:
+              - type: PatchSet
+                patchSetName: providerConfigRef
+              - type: PatchSet
+                patchSetName: deletionPolicy
+              - type: PatchSet
+                patchSetName: network-id
+              - type: PatchSet
+                patchSetName: region
+          - name: mainRouteTableAssociation
+            base:
+              apiVersion: ec2.aws.upbound.io/v1beta1
+              kind: MainRouteTableAssociation
+              spec:
+                forProvider:
+                  routeTableIdSelector:
+                    matchControllerRef: true
+                  vpcIdSelector:
+                    matchControllerRef: true
+            patches:
+              - type: PatchSet
+                patchSetName: providerConfigRef
+              - type: PatchSet
+                patchSetName: deletionPolicy
+              - type: PatchSet
+                patchSetName: network-id
+              - type: PatchSet
+                patchSetName: region
+          - name: routeTableAssociationPublicA
+            base:
+              apiVersion: ec2.aws.upbound.io/v1beta1
+              kind: RouteTableAssociation
+              spec:
+                forProvider:
+                  routeTableIdSelector:
+                    matchControllerRef: true
+                  subnetIdSelector:
+                    matchControllerRef: true
+                    matchLabels:
+                      access: public
+            patches:
+              - type: PatchSet
+                patchSetName: providerConfigRef
+              - type: PatchSet
+                patchSetName: deletionPolicy
+              - type: PatchSet
+                patchSetName: network-id
+              - type: PatchSet
+                patchSetName: region
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.region
+                toFieldPath: spec.forProvider.subnetIdSelector.matchLabels[zone]
+                transforms:
+                  - type: string
+                    string:
+                      fmt: '%sa'
+                      type: Format
+          - name: routeTableAssociationPublicB
+            base:
+              apiVersion: ec2.aws.upbound.io/v1beta1
+              kind: RouteTableAssociation
+              spec:
+                forProvider:
+                  routeTableIdSelector:
+                    matchControllerRef: true
+                  subnetIdSelector:
+                    matchControllerRef: true
+                    matchLabels:
+                      access: public
+            patches:
+              - type: PatchSet
+                patchSetName: providerConfigRef
+              - type: PatchSet
+                patchSetName: deletionPolicy
+              - type: PatchSet
+                patchSetName: network-id
+              - type: PatchSet
+                patchSetName: region
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.region
+                toFieldPath: spec.forProvider.subnetIdSelector.matchLabels[zone]
+                transforms:
+                  - type: string
+                    string:
+                      fmt: '%sb'
+                      type: Format
+          - name: routeTableAssociationPrivateA
+            base:
+              apiVersion: ec2.aws.upbound.io/v1beta1
+              kind: RouteTableAssociation
+              spec:
+                forProvider:
+                  routeTableIdSelector:
+                    matchControllerRef: true
+                  subnetIdSelector:
+                    matchControllerRef: true
+                    matchLabels:
+                      access: private
+            patches:
+              - type: PatchSet
+                patchSetName: providerConfigRef
+              - type: PatchSet
+                patchSetName: deletionPolicy
+              - type: PatchSet
+                patchSetName: network-id
+              - type: PatchSet
+                patchSetName: region
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.region
+                toFieldPath: spec.forProvider.subnetIdSelector.matchLabels[zone]
+                transforms:
+                  - type: string
+                    string:
+                      fmt: '%sa'
+                      type: Format
+          - name: routeTableAssociationPrivateB
+            base:
+              apiVersion: ec2.aws.upbound.io/v1beta1
+              kind: RouteTableAssociation
+              spec:
+                forProvider:
+                  routeTableIdSelector:
+                    matchControllerRef: true
+                  subnetIdSelector:
+                    matchControllerRef: true
+                    matchLabels:
+                      access: private
+            patches:
+              - type: PatchSet
+                patchSetName: providerConfigRef
+              - type: PatchSet
+                patchSetName: deletionPolicy
+              - type: PatchSet
+                patchSetName: network-id
+              - type: PatchSet
+                patchSetName: region
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.region
+                toFieldPath: spec.forProvider.subnetIdSelector.matchLabels[zone]
+                transforms:
+                  - type: string
+                    string:
+                      fmt: '%sb'
+                      type: Format
+          - name: securityGroup
+            base:
+              apiVersion: ec2.aws.upbound.io/v1beta1
+              kind: SecurityGroup
+              spec:
+                forProvider:
+                  description: Allow access to databases
+                  name: platform-ref-aws-cluster
+                  vpcIdSelector:
+                    matchControllerRef: true
+            patches:
+              - type: PatchSet
+                patchSetName: providerConfigRef
+              - type: PatchSet
+                patchSetName: deletionPolicy
+              - type: PatchSet
+                patchSetName: network-id
+              - type: PatchSet
+                patchSetName: region
+              - type: ToCompositeFieldPath
+                fromFieldPath: metadata.annotations[crossplane.io/external-name]
+                toFieldPath: status.securityGroupIds[0]
+          - name: securityGroupRulePostgres
+            base:
+              apiVersion: ec2.aws.upbound.io/v1beta1
+              kind: SecurityGroupRule
+              spec:
+                forProvider:
+                  cidrBlocks:
+                    - 0.0.0.0/0
+                  description: Everywhere
+                  fromPort: 5432
+                  protocol: tcp
+                  securityGroupIdSelector:
+                    matchControllerRef: true
+                  toPort: 5432
+                  type: ingress
+            patches:
+              - type: PatchSet
+                patchSetName: providerConfigRef
+              - type: PatchSet
+                patchSetName: deletionPolicy
+              - type: PatchSet
+                patchSetName: network-id
+              - type: PatchSet
+                patchSetName: region
+          - name: securityGroupRuleMysql
+            base:
+              apiVersion: ec2.aws.upbound.io/v1beta1
+              kind: SecurityGroupRule
+              spec:
+                forProvider:
+                  cidrBlocks:
+                    - 0.0.0.0/0
+                  description: Everywhere
+                  fromPort: 3306
+                  protocol: tcp
+                  securityGroupIdSelector:
+                    matchControllerRef: true
+                  toPort: 3306
+                  type: ingress
+            patches:
+              - type: PatchSet
+                patchSetName: providerConfigRef
+              - type: PatchSet
+                patchSetName: deletionPolicy
+              - type: PatchSet
+                patchSetName: network-id
+              - type: PatchSet
+                patchSetName: region
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: xsqlinstances.platform.example.org
+spec:
+  claimNames:
+    kind: SQLInstance
+    plural: sqlinstances
+  connectionSecretKeys:
+    - username
+    - password
+    - endpoint
+    - host
+  group: platform.example.org
+  names:
+    kind: XSQLInstance
+    plural: xsqlinstances
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                parameters:
+                  type: object
+                  properties:
+                    region:
+                      type: string
+                      description: Region is the region you'd like your resource to be created in.
+                    deletionPolicy:
+                      description: Delete the external resources when the Claim/XR is deleted. Defaults to Delete
+                      enum:
+                        - Delete
+                        - Orphan
+                      type: string
+                      default: Delete
+                    providerConfigName:
+                      description: Crossplane ProviderConfig to use for provisioning this resources
+                      type: string
+                      default: default
+                    engine:
+                      type: string
+                      description: This RDS Instance engine, see https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBInstance.html for possible values.
+                      enum:
+                        - postgres
+                        - mariadb
+                    engineVersion:
+                      type: string
+                      description: This RDS Instance engine version, see https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/API_CreateDBInstance.html for possible values.
+                    storageGB:
+                      type: integer
+                    passwordSecretRef:
+                      type: object
+                      description: "A reference to the Secret object containing database password"
+                      properties:
+                        namespace:
+                          type: string
+                        name:
+                          type: string
+                        key:
+                          type: string
+                      required:
+                        - namespace
+                        - name
+                        - key
+                    autoGeneratePassword:
+                      type: boolean
+                    networkRef:
+                      type: object
+                      description: "A reference to the Network object that this database should be connected to."
+                      properties:
+                        id:
+                          type: string
+                          description: ID of the Network object this ref points to.
+                      required:
+                        - id
+                  required:
+                    - region
+                    - engine
+                    - engineVersion
+                    - storageGB
+                    - networkRef
+                    - passwordSecretRef
+              required:
+                - parameters
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: xsqlinstances.platform.example.org
+  labels:
+    provider: aws
+spec:
+  writeConnectionSecretsToNamespace: upbound-system
+  compositeTypeRef:
+    apiVersion: platform.example.org/v1alpha1
+    kind: XSQLInstance
+  mode: Pipeline
+  pipeline:
+    - step: patch-and-transform
+      functionRef:
+        name: crossplane-contrib-function-patch-and-transform
+      input:
+        apiVersion: pt.fn.crossplane.io/v1beta1
+        kind: Resources
+        patchSets:
+          - name: providerConfigRef
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.providerConfigName
+                toFieldPath: spec.providerConfigRef.name
+          - name: deletionPolicy
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.deletionPolicy
+                toFieldPath: spec.deletionPolicy
+          - name: region
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.region
+                toFieldPath: spec.forProvider.region
+        resources:
+          - name: compositeSQLInstanceDbSubnetGroup
+            base:
+              apiVersion: rds.aws.upbound.io/v1beta1
+              kind: SubnetGroup
+              spec:
+                forProvider:
+                  description: An excellent formation of subnetworks.
+            patches:
+              - patchSetName: providerConfigRef
+                type: PatchSet
+              - patchSetName: deletionPolicy
+                type: PatchSet
+              - patchSetName: region
+                type: PatchSet
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.networkRef.id
+                toFieldPath: spec.forProvider.subnetIdSelector.matchLabels[networks.platform.example.org/network-id]
+          - name: RDSInstanceSmall
+            base:
+              apiVersion: rds.aws.upbound.io/v1beta1
+              kind: Instance
+              spec:
+                forProvider:
+                  dbName: upbound
+                  dbSubnetGroupNameSelector:
+                    matchControllerRef: true
+                  instanceClass: db.t3.micro
+                  publiclyAccessible: false
+                  skipFinalSnapshot: true
+                  username: masteruser
+            connectionDetails:
+              - type: FromFieldPath
+                fromFieldPath: status.atProvider.endpoint
+                name: endpoint
+              - type: FromFieldPath
+                fromFieldPath: status.atProvider.address
+                name: host
+              - type: FromFieldPath
+                fromFieldPath: spec.forProvider.username
+                name: username
+              - type: FromConnectionSecretKey
+                fromConnectionSecretKey: attribute.password
+                name: password
+            patches:
+              - type: PatchSet
+                patchSetName: providerConfigRef
+              - type: PatchSet
+                patchSetName: deletionPolicy
+              - type: PatchSet
+                patchSetName: region
+              - type: FromCompositeFieldPath
+                fromFieldPath: metadata.uid
+                toFieldPath: spec.writeConnectionSecretToRef.name
+                transforms:
+                  - type: string
+                    string:
+                      fmt: '%s-sql'
+                      type: Format
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.writeConnectionSecretToRef.namespace
+                toFieldPath: spec.writeConnectionSecretToRef.namespace
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.engine
+                toFieldPath: spec.forProvider.engine
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.engineVersion
+                toFieldPath: spec.forProvider.engineVersion
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.storageGB
+                toFieldPath: spec.forProvider.allocatedStorage
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.networkRef.id
+                toFieldPath: spec.forProvider.vpcSecurityGroupIdSelector.matchLabels[networks.platform.example.org/network-id]
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.autoGeneratePassword
+                toFieldPath: spec.forProvider.autoGeneratePassword
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.passwordSecretRef.namespace
+                toFieldPath: spec.forProvider.passwordSecretRef.namespace
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.passwordSecretRef.name
+                toFieldPath: spec.forProvider.passwordSecretRef.name
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.passwordSecretRef.key
+                toFieldPath: spec.forProvider.passwordSecretRef.key

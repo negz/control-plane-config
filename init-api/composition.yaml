@@ -1,0 +1,91 @@
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: xinitconfigs.aws.platform.upbound.io
+spec:
+  writeConnectionSecretsToNamespace: upbound-system
+  compositeTypeRef:
+    apiVersion: aws.platform.upbound.io/v1alpha1
+    kind: XInitConifg
+  mode: Pipeline
+  pipeline:
+  - step: patch-and-transform
+    functionRef:
+      name: crossplane-contrib-function-patch-and-transform
+    input:
+      apiVersion: pt.fn.crossplane.io/v1beta1
+      kind: Resources
+      resources:
+      - name: deploymentruntimeconfig
+        base:
+          apiVersion: pkg.crossplane.io/v1beta1
+          kind: DeploymentRuntimeConfig
+          metadata:
+            # TODO(negz): How do providers know to use this?
+            name: default
+          spec:
+            deploymentTemplate:
+              spec:
+                selector: {}
+                template:
+                  spec:
+                    containers:
+                    - name: package-runtime
+                      args:
+                      - --enable-external-secret-stores
+                      - --enable-management-policies
+        patches:
+        - type: FromCompositeFieldPath
+          fromFieldPath: spec.irsaRoleARN
+          toFieldPath: spec.deploymentTemplate.metadata.annotations[eks.amazonaws.com/role-arn]
+        readinessChecks:
+        - type: None
+      - name: providerconfig
+        base:
+          apiVersion: aws.upbound.io/v1beta1
+          kind: ProviderConfig
+          metadata:
+            name: default
+          spec:
+            credentials:
+              source: IRSA
+      - name: storeconfig
+        base:
+          apiVersion: secrets.crossplane.io/v1alpha1
+          kind: StoreConfig
+          metadata:
+            name: vault
+          spec:
+            type: Plugin
+            defaultScope: crossplane-system
+            plugin:
+              endpoint: ess-plugin-vault.crossplane-system:4040
+              configRef:
+                apiVersion: secrets.crossplane.io/v1alpha1
+                kind: VaultConfig
+                name: vault-internal
+        readinessChecks:
+        - type: None
+      # TODO(negz): This CRD is installed by the Vault plugin Helm chart,
+      # which means you need to install that plugin before it will work.
+      - name: vaultconfig
+        base:
+          apiVersion: secrets.crossplane.io/v1alpha1
+          kind: VaultConfig
+          metadata:
+            name: vault-internal
+          spec:
+            mountPath: secret/controlplane-blue/
+            version: v2
+            auth:
+              method: Token
+              token:
+                source: Filesystem
+                fs:
+                  path: /vault/secrets/token
+        patches:
+        - type: FromCompositeFieldPath
+          fromFieldPath: spec.vaultServer
+          toFieldPath: spec.server
+        readinessChecks:
+        - type: None

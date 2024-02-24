@@ -1,0 +1,51 @@
+apiVersion: pkg.crossplane.io/v1
+kind: ConfigurationSource
+metadata:
+  name: example-control-plane
+spec:
+  # The spec of the ConfigurationSource is mostly identical to crossplane.yaml.
+  crossplane:
+    version: ">=v1.14.1-0"
+  dependsOn:
+  - provider: xpkg.upbound.io/upbound/provider-aws-rds
+    version: "v1.1.1"
+  - provider: xpkg.upbound.io/upbound/provider-aws-ec2
+    version: "v1.1.1"
+  - function: xpkg.upbound.io/crossplane-contrib/function-patch-and-transform
+    version: "v0.3.0"
+  init:
+    compositeTypeRef:
+      apiVersion: example.crossplane.io/v1
+      Kind: XInitConfig
+  # However it also includes an array of all 'packaged' objects. Pretend this
+  # array contains every XRD and Composition in this repository, from both the
+  # apis/ and init-api/ directories. I'm too lazy to re-ident hundreds of lines
+  # of YAML by hand to include them here. :)
+  objects:
+  - apiVersion: apiextensions.crossplane.io/v1
+    kind: CompositeResourceDefinition
+    metadata:
+      name: xinitconfigs.aws.platform.upbound.io
+    spec:
+      group: aws.platform.upbound.io
+      names:
+        kind: XInitConfig
+        plural: xinitconfigs
+      versions:
+        - name: v1alpha1
+          served: true
+          referenceable: true
+          schema:
+            openAPIV3Schema:
+              type: object
+              properties:
+                spec:
+                  type: object
+                  properties:
+                    irsaRoleARN:
+                      type: string
+                    vaultServer:
+                      type: string
+                  required:
+                    - vaultServer
+                    - irsaRoleARN
